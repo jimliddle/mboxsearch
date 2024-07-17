@@ -5,7 +5,7 @@ Python script to search / view mbox email
 
 ### SEARCH WITH MATCHING:
 
-python mbox_search.py C:\Users\Takeout\Mail\ "i135@gmail.com" --field all
+python mbox_search.py C:\Users\Takeout\Mail\ "anyemailyoulike@someemail.com" --field all
 
 
 The script will process the mbox files and display a list of matching emails with their index numbers. The output will look something like this:
