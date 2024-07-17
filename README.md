@@ -1,5 +1,5 @@
 # mboxsearch
-Python script to search / view mbox email
+Python script to search / view mbox email. Developed to be able to find emails in Google Takeout Mbbox file.
 
 ## Example usage:
 
