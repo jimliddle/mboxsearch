@@ -1,174 +1,215 @@
-import mailbox
-import email
+"""Search and browse mbox archives without repeatedly parsing every message."""
+
 import argparse
-import os
-from tqdm import tqdm
+import email
 import logging
-import re
+import os
+from pathlib import Path
+import sqlite3
+import sys
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from mbox_index import MailboxStore, compile_term, parse_terms
+from mbox_attachments import export_attachments, list_attachments
+from mbox_render import message_headers, message_text, safe_text
 
-def search_mbox(mbox_file, search_terms, exact, log_file=None):
-    logging.info(f"Searching file: {mbox_file}")
-    results = []
-    try:
-        with open(mbox_file, 'r', encoding='utf-8', errors='replace') as f:
-            message = []
-            index = 0
-            for line in tqdm(f, desc="Processing messages"):
-                if line.startswith("From "):
-                    if message:
-                        process_message(''.join(message), search_terms, results, mbox_file, index, exact, log_file)
-                        index += 1
-                    message = [line]
-                else:
-                    message.append(line)
-            if message:
-                process_message(''.join(message), search_terms, results, mbox_file, index, exact, log_file)
-        logging.info(f"Found {len(results)} matches in {mbox_file}")
-    except Exception as e:
-        logging.error(f"Error opening or reading {mbox_file}: {str(e)}")
-    
-    return results
-
-def process_message(raw_message, search_terms, results, mbox_file, index, exact, log_file=None):
-    try:
-        message = email.message_from_string(raw_message)
-        if all(check_term(message, term, field, exact) for term, field in search_terms):
-            results.append((mbox_file, index, message))
-            log_message(f"Match found in message {index} from {mbox_file}: {message['subject']}\n", log_file)
-    except Exception as e:
-        logging.error(f"Error processing message {index} in {mbox_file}: {str(e)}")
 
 def check_term(message, term, field, exact):
-    if exact:
-        pattern = re.compile(r'\b' + re.escape(term) + r'\b', re.IGNORECASE)
-    else:
-        pattern = re.compile(re.escape(term), re.IGNORECASE)
-    
-    if field == 'all' or field == 'content':
+    """Compatibility helper: content/all search serialized MIME, including headers."""
+    pattern = compile_term(term, exact)
+    if field in ("all", "content"):
         return bool(pattern.search(message.as_string()))
-    elif field == 'subject' and 'subject' in message:
-        return bool(pattern.search(message['subject']))
-    elif field == 'from' and 'from' in message:
-        return bool(pattern.search(message['from']))
-    elif field == 'to' and 'to' in message:
-        return bool(pattern.search(message['to']))
+    if field in ("subject", "from", "to"):
+        value = message.get(field)
+        return value is not None and bool(pattern.search(value))
     return False
 
+
+def process_message(raw_message, search_terms, results, mbox_file, index, exact, log_file=None):
+    message = email.message_from_string(raw_message)
+    if all(check_term(message, term, field, exact) for term, field in search_terms):
+        results.append((mbox_file, index, message))
+        log_message("Match found in message {} from {}: {}\n".format(
+            index, mbox_file, safe_text(message.get("subject", ""))), log_file)
+
+
+def search_mbox(mbox_file, search_terms, exact, log_file=None):
+    """Keep the original list-of-(file, index, Message) API for existing callers.
+
+    The CLI/TUI uses disk-backed Results instead; this legacy API necessarily
+    loads all matches to preserve its return type.
+    """
+    results = []
+    try:
+        with MailboxStore(mbox_file) as store:
+            matches = store.search(search_terms, exact)
+            for info in matches:
+                message = store.get_message(info)
+                results.append((mbox_file, info.index, message))
+                log_message("Match found in message {} from {}: {}\n".format(
+                    info.index, mbox_file, safe_text(info.subject)), log_file)
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        logging.error("Error opening or reading %s: %s", mbox_file, error)
+    return results
+
+
 def view_message(message):
-    print(f"From: {message['from']}")
-    print(f"To: {message['to']}")
-    print(f"Subject: {message['subject']}")
-    print(f"Date: {message['date']}")
-    print("\nContent:")
-    
-    if message.is_multipart():
-        for part in message.walk():
-            if part.get_content_type() == "text/plain":
-                print(part.get_payload(decode=True).decode(errors='replace'))
+    print("\n".join(message_headers(message)))
+    print("\nContent:\n" + message_text(message))
+    _show_attachments(message)
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        input("\nPress Enter to continue...")
+
+
+def _show_attachments(message):
+    attachments = list_attachments(message)
+    if attachments:
+        print("\nAttachments:")
+        for attachment in attachments:
+            print("{}. {} ({})".format(attachment.number, safe_text(attachment.filename), attachment.content_type))
+        print("Use --view INDEX --save-attachments DIRECTORY to save these files.")
     else:
-        print(message.get_payload(decode=True).decode(errors='replace'))
-    
-    input("\nPress Enter to continue...")
+        print("\nNo attachments.")
+
 
 def log_message(message, log_file=None):
     if log_file:
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(message)
-    logging.info(message)
+        with open(log_file, "a", encoding="utf-8") as stream:
+            stream.write(message)
+    logging.info(message.rstrip())
 
-def main():
-    parser = argparse.ArgumentParser(description="Search and view mbox email files.")
-    parser.add_argument("mbox_dir", help="Directory containing mbox files")
-    parser.add_argument("search_terms", nargs='*', help="Search terms with optional field prefixes (e.g., 'subject:term' or just 'term')")
-    parser.add_argument("--field", choices=['all', 'subject', 'from', 'to', 'content'], 
-                        default='all', help="Field to search in (default: all)")
-    parser.add_argument("--exact", action='store_true', help="Enable exact match for search terms")
-    parser.add_argument("--log", help="Log file to log matching emails")
-    parser.add_argument("--view", help="View a specific message by its index", type=int)
-    args = parser.parse_args()
-
-    if args.view is not None:
-        view_specific_message(args.mbox_dir, args.view)
-        return
-
-    logging.info(f"Starting search in directory: {args.mbox_dir}")
-    logging.info(f"Searching for terms: {args.search_terms}")
-    logging.info(f"Searching in field: {args.field}")
-    logging.info(f"Exact match: {args.exact}")
-
-    search_terms = []
-    if len(args.search_terms) == 1 and args.field != 'all':
-        search_terms.append((args.search_terms[0], args.field))
-    else:
-        for term in args.search_terms:
-            if ':' in term:
-                field, keyword = term.split(':', 1)
-            else:
-                field, keyword = 'all', term
-            search_terms.append((keyword, field))
-
-    results = []
-    mbox_files = [os.path.join(root, file) 
-                  for root, _, files in os.walk(args.mbox_dir) 
-                  for file in files if file.endswith('.mbox')]
-    
-    for mbox_file in mbox_files:
-        results.extend(search_mbox(mbox_file, search_terms, args.exact, args.log))
-
-    logging.info(f"\nFound {len(results)} matching emails in total.")
-    
-    if results:
-        while True:
-            for i, (mbox_file, index, message) in enumerate(results, 1):
-                print(f"{i}. [{os.path.basename(mbox_file)}] {message['subject']}\n")
-            
-            choice = input("\nEnter the number of the email to view (1-{}) or 'q' to quit: ".format(len(results)))
-            if choice.lower() == 'q':
-                break
-            try:
-                index = int(choice) - 1
-                if 0 <= index < len(results):
-                    mbox_file, msg_index, message = results[index]
-                    print(f"\nViewing email from {os.path.basename(mbox_file)}, message index {msg_index}")
-                    view_message(message)
-                else:
-                    print("Invalid number. Please try again.")
-            except ValueError:
-                print("Invalid input. Please enter a number or 'q'.")
 
 def view_specific_message(mbox_dir, message_index):
-    mbox_files = [os.path.join(root, file) 
-                  for root, _, files in os.walk(mbox_dir) 
-                  for file in files if file.endswith('.mbox')]
+    with MailboxStore(mbox_dir) as store:
+        info = store.at_index(message_index)
+        if info is None:
+            print("Message with index {} not found in any mbox file in {}".format(message_index, mbox_dir))
+        else:
+            view_message(store.get_mime_message(info))
 
-    found = False
-    for mbox_file in mbox_files:
-        logging.info(f"Checking file: {mbox_file}")
-        with open(mbox_file, 'r', encoding='utf-8', errors='replace') as f:
-            message = []
-            index = 0
-            for line in tqdm(f, desc="Reading mbox file"):
-                if line.startswith("From "):
-                    if message:
-                        if index == message_index:
-                            found = True
-                            view_message(email.message_from_string(''.join(message)))
-                            break
-                        index += 1
-                    message = [line]
+
+def _show_results(results, start=0, limit=50):
+    for number, info in enumerate(results.page(start, limit), start + 1):
+        print("{}. [{}] {} (index {})".format(number, safe_text(Path(info.file).name),
+              safe_text(info.subject) or "(no subject)", info.index))
+
+
+def _plain_browser(store, results):
+    start = 0
+    while True:
+        _show_results(results, start)
+        choice = input("\nEmail number (1-{}), n/p page, or q: ".format(len(results))).strip().lower()
+        if choice == "q":
+            return
+        if choice == "n":
+            start = min(start + 50, ((len(results) - 1) // 50) * 50)
+        elif choice == "p":
+            start = max(0, start - 50)
+        else:
+            try:
+                index = int(choice) - 1
+                if index < 0:
+                    raise IndexError(index)
+                info = results[index]
+                print("\nViewing email from {}, message index {}".format(Path(info.file).name, info.index))
+                view_message(store.get_mime_message(info))
+            except (ValueError, IndexError):
+                print("Invalid number. Please try again.")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Search and browse indexed mbox email files.")
+    parser.add_argument("mbox_dir", help="Directory containing .mbox files, or a single mbox file")
+    parser.add_argument("search_terms", nargs="*", help="AND terms, optionally prefixed with subject:, from:, to:, content:, all:")
+    parser.add_argument("--field", choices=["all", "subject", "from", "to", "content"], default="all")
+    parser.add_argument("--exact", action="store_true", help="Case-insensitive whole-word matching")
+    parser.add_argument("--log", help="Append matching message headers to a log file")
+    parser.add_argument("--view", type=int, help="View a zero-based per-file message index")
+    parser.add_argument("--attachments", action="store_true", help="List attachments for --view without printing the body")
+    parser.add_argument("--save-attachments", metavar="DIRECTORY", help="Export attachments from --view into this directory")
+    parser.add_argument("--attachment", type=int, metavar="NUMBER", help="Export only this one-based attachment number")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--tui", action="store_true", help="Use the visual terminal browser (default on a supported terminal)")
+    modes.add_argument("--plain", action="store_true", help="Use the original numbered text browser")
+    modes.add_argument("--list", action="store_true", help="Print matches and exit; default when input/output is redirected")
+    parser.add_argument("--cache-dir", help="Store SQLite indexes here instead of the user cache directory")
+    parser.add_argument("--reindex", action="store_true", help="Rebuild cached offsets and discard cached search text")
+    args = parser.parse_args(argv)
+    if args.view is not None and args.view < 0:
+        parser.error("--view must be nonnegative")
+    if (args.attachments or args.save_attachments is not None) and args.view is None:
+        parser.error("attachment listing/export requires --view")
+    if args.attachment is not None:
+        if args.save_attachments is None:
+            parser.error("--attachment requires --save-attachments")
+        if args.attachment < 1:
+            parser.error("--attachment must be at least 1")
+    try:
+        terms = parse_terms(args.search_terms, args.field)
+    except ValueError as error:
+        parser.error(str(error))
+
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    terminal = os.environ.get("TERM", "") not in ("", "dumb")
+    tui = args.tui or (interactive and terminal and not args.plain and not args.list)
+    run_tui = None
+    if tui and args.view is None:
+        if not interactive or not terminal:
+            parser.error("--tui needs an interactive terminal with TERM set; use --plain or --list")
+        try:
+            from mbox_tui import run_tui
+        except ImportError:
+            if args.tui:
+                parser.error("curses is unavailable; on Windows install windows-curses, or use --plain")
+            tui = False
+
+    def progress(phase, path, done, total):
+        if sys.stderr.isatty():
+            print("\r{} {}: {}/{}".format(phase, safe_text(Path(path).name), done, total),
+                  end="\n" if done == total else "", file=sys.stderr, flush=True)
+
+    try:
+        with MailboxStore(args.mbox_dir, args.cache_dir, args.reindex, progress) as store:
+            if args.view is not None:
+                info = store.at_index(args.view)
+                if info is None:
+                    print("Message with index {} not found in {}".format(args.view, args.mbox_dir))
+                    return 1
+                message = store.get_mime_message(info)
+                if args.save_attachments is not None:
+                    count = 0
+                    for saved in export_attachments(message, args.save_attachments, args.attachment):
+                        print("Saved: " + safe_text(saved))
+                        count += 1
+                    if not count:
+                        print("No attachments in this message.")
+                elif args.attachments:
+                    print("\n".join(message_headers(message)))
+                    _show_attachments(message)
                 else:
-                    message.append(line)
-            if index == message_index and not found:
-                found = True
-                view_message(email.message_from_string(''.join(message)))
-        if found:
-            break
+                    view_message(message)
+            elif tui:
+                run_tui(store, terms, args.exact, args.field, args.log)
+            else:
+                results = store.search(terms, args.exact)
+                print("Found {} matching emails.".format(len(results)))
+                if args.log:
+                    with open(args.log, "a", encoding="utf-8") as stream:
+                        for info in results:
+                            stream.write("Match found in message {} from {}: {}\n".format(
+                                info.index, info.file, safe_text(info.subject)))
+                if not interactive or args.list or not len(results):
+                    for start in range(0, len(results), 100):
+                        _show_results(results, start, 100)
+                else:
+                    _plain_browser(store, results)
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        return 130
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+        print("Error: {}".format(error), file=sys.stderr)
+        return 1
+    return 0
 
-    if not found:
-        print(f"Message with index {message_index} not found in any mbox file in directory {mbox_dir}")
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
