@@ -232,8 +232,10 @@ class MailboxStore:
         self.files = files
 
     def _index_file(self, path):
+        before = signature(path.stat())
         with path.open("rb") as stream, self.db:
-            before = signature(os.fstat(stream.fileno()))
+            stream_before = signature(os.fstat(stream.fileno()))
+            self._verify_stream(path, stream, before, stream_before)
             total = os.fstat(stream.fileno()).st_size
             self.db.execute("DELETE FROM sources WHERE path=?", (str(path),))
             source_id = self.db.execute("INSERT INTO sources(path,signature) VALUES (?,?)",
@@ -260,7 +262,7 @@ class MailboxStore:
                     next_report = position + 8 * 1024 * 1024
             if position > start:
                 self._insert_header(source_id, number, start, position, headers)
-            self._verify_stream(path, stream, before)
+            self._verify_stream(path, stream, before, stream_before)
             self.progress("Indexing", path, total, total)
 
     def _insert_header(self, source_id, number, start, end, headers):
@@ -273,8 +275,13 @@ class MailboxStore:
              *(display_header(value) for value in values), display_header(message.get("date"))))
 
     @staticmethod
-    def _verify_stream(path, stream, expected):
-        if signature(os.fstat(stream.fileno())) != expected or signature(path.stat()) != expected:
+    def _verify_stream(path, stream, expected, stream_expected):
+        # Compare each API with its own snapshot. Windows stat/fstat can report
+        # different timestamps for the same unchanged file. File identity must
+        # still agree, so a replacement between stat() and open() is rejected.
+        current_stream = signature(os.fstat(stream.fileno()))
+        if (current_stream != stream_expected or signature(path.stat()) != expected
+                or json.loads(current_stream)[:2] != json.loads(expected)[:2]):
             raise MailboxChangedError("Mailbox changed while reading: " + str(path) + "; refresh or reopen it")
 
     def _verify_sources(self):
@@ -296,7 +303,8 @@ class MailboxStore:
             return
         # One transaction per source: a cancelled/failed build never marks it complete.
         with path.open("rb") as stream, self.db:
-            self._verify_stream(path, stream, expected)
+            stream_expected = signature(os.fstat(stream.fileno()))
+            self._verify_stream(path, stream, expected, stream_expected)
             cursor = self.db.execute(
                 "SELECT m.id,m.start,m.end FROM messages m LEFT JOIN search_text t ON t.message_id=m.id "
                 "WHERE m.source_id=? AND t.message_id IS NULL ORDER BY m.number", (source_id,))
@@ -308,7 +316,7 @@ class MailboxStore:
                                 (message_id, message.as_string()))
                 if done % 250 == 0:
                     self.progress("Caching search text", path, done, missing)
-            self._verify_stream(path, stream, expected)
+            self._verify_stream(path, stream, expected, stream_expected)
             self.progress("Caching search text", path, missing, missing)
 
     def search(self, terms=(), exact=False):
@@ -354,10 +362,11 @@ class MailboxStore:
             raise MailboxChangedError("Mailbox refreshed; run the search again")
         path, expected, start, end = row
         with open(path, "rb") as stream:
-            self._verify_stream(Path(path), stream, expected)
+            stream_expected = signature(os.fstat(stream.fileno()))
+            self._verify_stream(Path(path), stream, expected, stream_expected)
             stream.seek(start)
             raw = stream.read(end - start)
-            self._verify_stream(Path(path), stream, expected)
+            self._verify_stream(Path(path), stream, expected, stream_expected)
         return email.message_from_string(legacy_text(raw))
 
     def at_index(self, index):

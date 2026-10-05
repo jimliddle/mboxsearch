@@ -1,4 +1,3 @@
-import importlib.util
 import io
 from pathlib import Path
 import tempfile
@@ -6,6 +5,13 @@ import unittest
 from unittest.mock import patch
 
 import email
+
+try:
+    import curses
+except ImportError:
+    CURSES_AVAILABLE = False
+else:
+    CURSES_AVAILABLE = True
 
 from mbox_index import MailboxStore
 from mbox_render import message_headers, message_text, safe_text
@@ -38,7 +44,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("HTML", message_text(message))
 
 
-@unittest.skipUnless(importlib.util.find_spec("curses"), "curses unavailable")
+@unittest.skipUnless(CURSES_AVAILABLE, "curses unavailable")
 class BrowserTests(unittest.TestCase):
     def setUp(self):
         from mbox_tui import Browser

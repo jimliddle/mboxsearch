@@ -3,10 +3,11 @@ import io
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from mbox_index import MailboxChangedError, MailboxStore, binary_lines, parse_terms
+from mbox_index import MailboxChangedError, MailboxStore, binary_lines, parse_terms, signature
 from mbox_search import check_term, main, search_mbox
 
 
@@ -154,6 +155,21 @@ class IndexTests(unittest.TestCase):
                 store.get_message(old)
             with self.assertRaises(MailboxChangedError):
                 results[0]
+
+    def test_stat_and_fstat_timestamps_are_validated_independently(self):
+        stat = self.mail.stat()
+        handle_stat = SimpleNamespace(st_dev=stat.st_dev, st_ino=stat.st_ino,
+                                      st_size=stat.st_size, st_mtime_ns=stat.st_mtime_ns,
+                                      st_ctime_ns=stat.st_ctime_ns + 100)
+        with self.mail.open("rb") as stream, patch("mbox_index.os.fstat", return_value=handle_stat):
+            MailboxStore._verify_stream(self.mail, stream, signature(stat), signature(handle_stat))
+            expected = signature(handle_stat)
+            handle_stat.st_mtime_ns += 100
+            with self.assertRaises(MailboxChangedError):
+                MailboxStore._verify_stream(self.mail, stream, signature(stat), expected)
+            handle_stat.st_ino += 1
+            with self.assertRaises(MailboxChangedError):
+                MailboxStore._verify_stream(self.mail, stream, signature(stat), signature(handle_stat))
 
     def test_universal_newlines_at_chunk_boundaries(self):
         for raw in (b"a" * (1024 * 1024 - 1) + b"\r\nLast\r",
