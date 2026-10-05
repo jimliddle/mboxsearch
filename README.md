@@ -32,6 +32,10 @@ mbox files are opened read-only.
 | --- | --- |
 | Up/Down, `j`/`k` | Move in the focused pane |
 | Enter | Open the selected message |
+| `a` | List the selected message's attachments |
+| `s`, Enter (attachment list) | Save the selected attachment to a directory |
+| `A` (attachment list) | Save all attachments from this message |
+| Escape, `a`, Tab (attachment list) | Return to the message |
 | Tab | Switch between message list and reading pane |
 | Escape | Return focus to the list; cancel a search edit |
 | Page Up/Page Down, Space | Scroll by a page (Space goes forward) |
@@ -44,8 +48,10 @@ mbox files are opened read-only.
 | `q` | Quit |
 
 The reading pane decodes MIME charsets and encoded headers, prefers plain text,
-and converts HTML-only mail to text without loading remote content. Attachments
-are omitted from the reading pane. Terminal control characters are filtered.
+and converts HTML-only mail to text without loading remote content. The reading
+pane shows an attachment count; press `a` to list filenames and MIME types,
+then `s` to save a file or `A` to save all. Attachment data is omitted from the
+body preview. Terminal control characters are filtered.
 Very long previews stop at 200,000 characters; use `--view` to print the full
 readable text. Resize support includes a prompt for terminals smaller than
 50 columns by 12 rows.
@@ -97,6 +103,45 @@ python mbox_search.py /path/to/archive.mbox --view 128 > message.txt
 containing that index. Files are now visited in deterministic sorted path order.
 Result-list numbers are one-based across the current search and are distinct
 from these per-file indexes. Opening a message seeks directly to its byte range.
+
+## Retrieve attachments
+
+In the visual browser, select a message and press `a`. Use Up/Down to choose an
+attachment, then `s` (or Enter) to save it. `A` saves all attachments from that
+message. Enter the destination directory at the prompt; Escape cancels. The
+status line shows the saved path. You can then open the file with its normal
+application. Files are not launched automatically.
+
+Command-line attachment access also works without curses:
+
+```sh
+python mbox_search.py /path/to/archive.mbox --view 128 --attachments
+python mbox_search.py /path/to/archive.mbox --view 128 --save-attachments ./saved-files
+python mbox_search.py /path/to/archive.mbox --view 128 --save-attachments ./saved-files --attachment 2
+```
+
+`--attachments` lists files without printing the message body. `--save-attachments`
+exports all files by default; `--attachment` selects a **one-based** attachment
+number from that list. Both listing and export require `--view`; use a single
+mbox path to identify the exact file when several mailboxes contain that index.
+
+Base64 and quoted-printable payloads are decoded when saved. Byte-based MIME
+parsing preserves binary payloads, including 8-bit attachments. Inline images
+and unnamed non-text MIME parts are also listed; unnamed files get generated
+names. Attached emails are saved as `.eml` MIME messages, with their nested
+attachments included inside that file.
+
+Only the selected email is loaded; browsing does not decode attachments, and
+attachment export does not build the archive's full content-search cache.
+Large individual messages and attachment decoding can still use substantial
+memory. Search semantics remain unchanged: attachment documents are not parsed
+for searchable PDF/Word text.
+
+Saved names are made portable by stripping directory components, control
+characters, and reserved filename characters. Existing files are never
+overwritten: duplicate names become `report (2).pdf`, `report (3).pdf`, etc.
+Exports use private permissions on POSIX systems and leave the source mbox
+unchanged.
 
 ## Index design and performance
 
@@ -164,5 +209,6 @@ python benchmarks/benchmark.py --messages 10000 --body-bytes 4096
 
 Tests cover old matching semantics, lazy parsing, cache reuse/invalidation,
 interrupted builds, byte offsets and newline formats, pagination, CLI modes,
-MIME rendering, and terminal browser behavior. CI runs on Linux, macOS, and
+MIME rendering, binary attachment decoding/export, and terminal browser behavior.
+CI runs on Linux, macOS, and
 Windows with Python 3.9 and 3.13; curses-specific tests skip when unavailable.

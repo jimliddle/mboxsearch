@@ -37,7 +37,8 @@ class _HTMLText(HTMLParser):
 
 
 def _body_parts(message):
-    if message.get_content_disposition() == "attachment" or message.get_filename():
+    if (message.get_content_disposition() == "attachment" or message.get_filename()
+            or message.get_content_type() == "message/rfc822"):
         return
     if message.is_multipart():
         for part in message.get_payload():

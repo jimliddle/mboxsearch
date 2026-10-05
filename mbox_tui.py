@@ -7,6 +7,7 @@ import sqlite3
 import textwrap
 
 from mbox_index import parse_terms
+from mbox_attachments import list_attachments, save_attachment
 from mbox_render import message_headers, message_text, safe_text
 
 
@@ -20,18 +21,25 @@ class Browser:
         self.query = " ".join(shlex.quote(field + ":" + term) for term, field in terms)
         self.results = store.search(terms, exact)
         self.selected = 0
-        self.body = None
-        self.body_scroll = 0
+        self.clear_message()
         self.focus_body = False
+        self.last_save_directory = ""
         self.status = "Enter opens a message. / searches. ? shows help."
         self.help = False
+
+    def clear_message(self):
+        self.message = None
+        self.body = None
+        self.body_scroll = 0
+        self.attachments = []
+        self.attachment_selected = 0
+        self.show_attachments = False
 
     def move(self, delta):
         selected = max(0, min(len(self.results) - 1, self.selected + delta))
         if selected != self.selected:
             self.selected = selected
-            self.body = None
-            self.body_scroll = 0
+            self.clear_message()
 
     def apply_search(self, query, exact=None):
         tokens = shlex.split(query)
@@ -44,7 +52,7 @@ class Browser:
         self.results = results
         self.query, self.terms, self.exact = query, terms, new_exact
         self.selected = self.body_scroll = 0
-        self.body = None
+        self.clear_message()
         self.focus_body = False
         self.status = "{} matching messages".format(len(results))
         if self.log_file:
@@ -61,12 +69,56 @@ class Browser:
         if not len(self.results):
             return
         info = self.results[self.selected]
-        message = self.store.get_message(info)
-        self.body = message_headers(message) + [""] + message_text(message, limit=200000).splitlines()
+        if self.message is None:
+            self.message = self.store.get_mime_message(info)
+            self.attachments = list_attachments(self.message)
+        label = "Attachments: {} (a lists/saves files)".format(len(self.attachments))
+        self.body = message_headers(self.message) + [label, ""] + message_text(self.message, limit=200000).splitlines()
         self.body_scroll = 0
         self.focus_body = True
         self.status = "{} | message index {} | Tab returns to the list".format(
             Path(info.file).name, info.index)
+
+    def open_attachments(self):
+        if not len(self.results):
+            return
+        self.open_selected()
+        self.show_attachments = True
+        self.status = "Choose a file and press s to save, or A to save all."
+        if not self.attachments:
+            self.status = "No attachments in this message. Esc returns to the message."
+
+    def save_files(self, directory, all_files=False):
+        if not self.attachments:
+            self.status = "No attachments in this message."
+            return
+        selected = self.attachments if all_files else [self.attachments[self.attachment_selected]]
+        saved = []
+        for attachment in selected:
+            destination = save_attachment(attachment, directory)
+            saved.append(destination)
+            self.status = "Saved: " + str(destination)
+        self.last_save_directory = str(directory)
+        if all_files:
+            self.status = "Saved {} files to {}".format(len(saved), Path(directory).expanduser().resolve())
+
+    def attachment_key(self, key):
+        if key in ("\x1b", "a", "\t"):
+            self.show_attachments = False
+        elif key in ("?", "h"):
+            self.help = True
+        elif key in ("s", "A", "\n", "\r", curses.KEY_ENTER) and self.attachments:
+            directory = self.prompt("Save to directory: ", self.last_save_directory)
+            if directory is not None and directory.strip():
+                self._busy("Saving attachments...")
+                self.save_files(directory, all_files=(key == "A"))
+        else:
+            step = max(1, self.screen.getmaxyx()[0] - 7)
+            delta = {"j": 1, curses.KEY_DOWN: 1, "k": -1, curses.KEY_UP: -1,
+                     " ": step, curses.KEY_NPAGE: step, curses.KEY_PPAGE: -step,
+                     "g": -len(self.attachments), curses.KEY_HOME: -len(self.attachments),
+                     "G": len(self.attachments), curses.KEY_END: len(self.attachments)}.get(key, 0)
+            self.attachment_selected = max(0, min(len(self.attachments) - 1, self.attachment_selected + delta))
 
     def refresh(self):
         self.store.refresh()
@@ -76,7 +128,7 @@ class Browser:
         self.results = self.store.search()
         old.close()
         self.selected = self.body_scroll = 0
-        self.body = None
+        self.clear_message()
         self.focus_body = False
         self.apply_search(self.query)
 
@@ -98,8 +150,13 @@ class Browser:
                 try:
                     if self.help:
                         self.help = False
+                    elif self.show_attachments:
+                        self.attachment_key(key)
                     elif key in ("?", "h"):
                         self.help = True
+                    elif key == "a":
+                        self._busy("Loading attachments...")
+                        self.open_attachments()
                     elif key == "/":
                         query = self.prompt("Search: ", self.query)
                         if query is not None:
@@ -186,6 +243,7 @@ class Browser:
         if self.help:
             lines = ["Up/Down or j/k: move in focused pane; PgUp/PgDn or Space: page",
                      "Enter: load selected message; Tab: switch list/message; Esc: list",
+                     "a: list attachments; in that list, s saves one, A saves all",
                      "/: edit search (quotes supported); c: clear; x: toggle whole word",
                      "r: refresh changed/new mailboxes; g/G or Home/End: first/last",
                      "Fields: subject:, from:, to:, content:, all:; terms use AND",
@@ -193,6 +251,15 @@ class Browser:
                      "q: quit; any other key: close help"]
             for row, text in enumerate(lines, 3):
                 self.put(row, text)
+        elif self.show_attachments:
+            self.put(2, "Attachments: {} | s save selected | A save all | Esc back".format(len(self.attachments)), curses.A_BOLD)
+            self.put(3, " #    Type                     Filename", curses.A_DIM)
+            size = max(1, height - 7)
+            top = (self.attachment_selected // size) * size
+            for offset, attachment in enumerate(self.attachments[top:top + size]):
+                self.put(4 + offset, "{:>5} {:24} {}".format(
+                    attachment.number, attachment.content_type[:24], safe_text(attachment.filename)),
+                    curses.A_REVERSE if top + offset == self.attachment_selected else 0)
         else:
             size = self.page_size()
             top = (self.selected // size) * size
@@ -219,7 +286,9 @@ class Browser:
             for row, line in enumerate(lines[:height - divider - 3], divider + 1):
                 self.put(row, line)
         self.put(height - 2, self.status, curses.A_DIM)
-        self.put(height - 1, "↑↓ move  Enter read  Tab pane  / search  c clear  x exact  r refresh  ? help  q quit",
+        footer = ("↑↓ choose  s save  A save all  Esc back  ? help  q quit" if self.show_attachments
+                  else "↑↓ move  Enter read  Tab pane  a attachments  / search  ? help  q quit")
+        self.put(height - 1, footer,
                  curses.A_REVERSE)
         screen.refresh()
 

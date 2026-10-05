@@ -9,6 +9,7 @@ import sqlite3
 import sys
 
 from mbox_index import MailboxStore, compile_term, parse_terms
+from mbox_attachments import export_attachments, list_attachments
 from mbox_render import message_headers, message_text, safe_text
 
 
@@ -54,8 +55,20 @@ def search_mbox(mbox_file, search_terms, exact, log_file=None):
 def view_message(message):
     print("\n".join(message_headers(message)))
     print("\nContent:\n" + message_text(message))
+    _show_attachments(message)
     if sys.stdin.isatty() and sys.stdout.isatty():
         input("\nPress Enter to continue...")
+
+
+def _show_attachments(message):
+    attachments = list_attachments(message)
+    if attachments:
+        print("\nAttachments:")
+        for attachment in attachments:
+            print("{}. {} ({})".format(attachment.number, safe_text(attachment.filename), attachment.content_type))
+        print("Use --view INDEX --save-attachments DIRECTORY to save these files.")
+    else:
+        print("\nNo attachments.")
 
 
 def log_message(message, log_file=None):
@@ -71,7 +84,7 @@ def view_specific_message(mbox_dir, message_index):
         if info is None:
             print("Message with index {} not found in any mbox file in {}".format(message_index, mbox_dir))
         else:
-            view_message(store.get_message(info))
+            view_message(store.get_mime_message(info))
 
 
 def _show_results(results, start=0, limit=50):
@@ -98,7 +111,7 @@ def _plain_browser(store, results):
                     raise IndexError(index)
                 info = results[index]
                 print("\nViewing email from {}, message index {}".format(Path(info.file).name, info.index))
-                view_message(store.get_message(info))
+                view_message(store.get_mime_message(info))
             except (ValueError, IndexError):
                 print("Invalid number. Please try again.")
 
@@ -111,6 +124,9 @@ def main(argv=None):
     parser.add_argument("--exact", action="store_true", help="Case-insensitive whole-word matching")
     parser.add_argument("--log", help="Append matching message headers to a log file")
     parser.add_argument("--view", type=int, help="View a zero-based per-file message index")
+    parser.add_argument("--attachments", action="store_true", help="List attachments for --view without printing the body")
+    parser.add_argument("--save-attachments", metavar="DIRECTORY", help="Export attachments from --view into this directory")
+    parser.add_argument("--attachment", type=int, metavar="NUMBER", help="Export only this one-based attachment number")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--tui", action="store_true", help="Use the visual terminal browser (default on a supported terminal)")
     modes.add_argument("--plain", action="store_true", help="Use the original numbered text browser")
@@ -120,6 +136,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.view is not None and args.view < 0:
         parser.error("--view must be nonnegative")
+    if (args.attachments or args.save_attachments is not None) and args.view is None:
+        parser.error("attachment listing/export requires --view")
+    if args.attachment is not None:
+        if args.save_attachments is None:
+            parser.error("--attachment requires --save-attachments")
+        if args.attachment < 1:
+            parser.error("--attachment must be at least 1")
     try:
         terms = parse_terms(args.search_terms, args.field)
     except ValueError as error:
@@ -151,7 +174,19 @@ def main(argv=None):
                 if info is None:
                     print("Message with index {} not found in {}".format(args.view, args.mbox_dir))
                     return 1
-                view_message(store.get_message(info))
+                message = store.get_mime_message(info)
+                if args.save_attachments is not None:
+                    count = 0
+                    for saved in export_attachments(message, args.save_attachments, args.attachment):
+                        print("Saved: " + safe_text(saved))
+                        count += 1
+                    if not count:
+                        print("No attachments in this message.")
+                elif args.attachments:
+                    print("\n".join(message_headers(message)))
+                    _show_attachments(message)
+                else:
+                    view_message(message)
             elif tui:
                 run_tui(store, terms, args.exact, args.field, args.log)
             else:
@@ -170,7 +205,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
         return 130
-    except (OSError, RuntimeError, sqlite3.Error) as error:
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
         print("Error: {}".format(error), file=sys.stderr)
         return 1
     return 0

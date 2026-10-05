@@ -354,7 +354,7 @@ class MailboxStore:
                 self._patterns.pop(key, None)
         return Results(self, table)
 
-    def get_message(self, info):
+    def _read_message_bytes(self, info):
         row = self.db.execute(
             "SELECT s.path,s.signature,m.start,m.end FROM messages m "
             "JOIN sources s ON s.id=m.source_id WHERE m.id=?", (info.id,)).fetchone()
@@ -367,7 +367,15 @@ class MailboxStore:
             stream.seek(start)
             raw = stream.read(end - start)
             self._verify_stream(Path(path), stream, expected, stream_expected)
-        return email.message_from_string(legacy_text(raw))
+        return raw
+
+    def get_message(self, info):
+        """Retain the original text-parser behavior for search/API compatibility."""
+        return email.message_from_string(legacy_text(self._read_message_bytes(info)))
+
+    def get_mime_message(self, info):
+        """Preserve original payload bytes for reading and attachment extraction."""
+        return email.message_from_bytes(self._read_message_bytes(info))
 
     def at_index(self, index):
         # --view historically means this zero-based index in the first file that has it.

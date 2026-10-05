@@ -62,7 +62,7 @@ class BrowserTests(unittest.TestCase):
 
     def test_navigation_lazy_read_search_and_exact(self):
         browser = self.browser
-        with patch.object(self.store, "get_message", wraps=self.store.get_message) as load:
+        with patch.object(self.store, "get_mime_message", wraps=self.store.get_mime_message) as load:
             browser.move(100)
             self.assertEqual(browser.selected, 1)
             self.assertIsNone(browser.body)
@@ -135,6 +135,28 @@ class BrowserTests(unittest.TestCase):
                 self.browser.refresh()
         self.assertEqual(len(self.browser.results), 1)
         self.assertEqual(self.browser.results[0].subject, "Updated")
+
+    def test_attachment_listing_saving_and_message_state_reset(self):
+        from email.message import EmailMessage
+        message = EmailMessage()
+        message["Subject"] = "Attached"
+        message.set_content("Cover note")
+        message.add_attachment(b"\x00\xffbytes", maintype="application", subtype="octet-stream", filename="sample.bin")
+        self.store.files[0].write_bytes(b"From sender\n" + message.as_bytes())
+        self.browser.refresh()
+        with patch.object(self.store, "get_mime_message", wraps=self.store.get_mime_message) as load:
+            self.browser.open_attachments()
+            self.assertTrue(self.browser.show_attachments)
+            self.assertEqual(self.browser.attachments[0].filename, "sample.bin")
+            self.assertEqual(load.call_count, 1)
+            self.browser.save_files(Path(self.temp.name) / "saved")
+            self.assertEqual((Path(self.temp.name) / "saved" / "sample.bin").read_bytes(), b"\x00\xffbytes")
+            self.browser.open_selected()
+            self.assertEqual(load.call_count, 1)
+            self.browser.apply_search("")
+            self.assertFalse(self.browser.show_attachments)
+            self.assertIsNone(self.browser.message)
+            self.assertEqual(self.browser.attachments, [])
 
 
 if __name__ == "__main__":
