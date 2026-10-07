@@ -51,8 +51,8 @@ class BrowserTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         path = Path(self.temp.name)
         mail = path / "sample.mbox"
-        mail.write_bytes(b"From alice\nSubject: One\nFrom: Alice\n\nFirst body\n"
-                         b"From bob\nSubject: Two\nFrom: Bob\n\nSecond body\n")
+        mail.write_bytes(b"From alice\nSubject: One\nFrom: Alice\nDate: 1 Jan 2024 12:00:00 +0000\n\nFirst body\n"
+                         b"From bob\nSubject: Two\nFrom: Bob\nDate: 1 Feb 2024 12:00:00 +0000\n\nSecond body\n")
         self.store = MailboxStore(mail, path / "cache")
         self.browser = Browser(self.store)
 
@@ -121,6 +121,19 @@ class BrowserTests(unittest.TestCase):
         browser.apply_search(browser.query, exact=True)
         self.assertEqual(len(browser.results), 1)
         browser.apply_search("from:Alice")
+        self.assertEqual(len(browser.results), 1)
+        self.assertEqual(browser.results[0].subject, "One")
+
+    def test_date_range_with_name_keyword_and_invalid_input(self):
+        browser = self.browser
+        browser.apply_search('from:"Alice" after:2024-01-01 before:2024-02-01')
+        self.assertEqual(len(browser.results), 1)
+        self.assertEqual(browser.results[0].subject, "One")
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM search_text").fetchone()[0], 0)
+        browser.apply_search('from:Alice after:2024-01-01 before:2024-02-01 content:"First body"')
+        self.assertEqual(len(browser.results), 1)
+        with self.assertRaisesRegex(ValueError, "YYYY-MM-DD"):
+            browser.apply_search("after:2024-02-30")
         self.assertEqual(len(browser.results), 1)
         self.assertEqual(browser.results[0].subject, "One")
 

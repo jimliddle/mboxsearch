@@ -3,6 +3,7 @@
 import email
 from email.header import decode_header
 from email.parser import HeaderParser
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import os
@@ -10,9 +11,11 @@ from pathlib import Path
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import date, timezone
 
 
 FIELDS = ("all", "subject", "from", "to", "content")
+DATE_FIELDS = ("after", "before")
 SCHEMA_VERSION = 1
 
 
@@ -30,12 +33,39 @@ def parse_terms(terms, field="all"):
     for term in terms:
         prefix, separator, value = term.partition(":")
         if separator:
-            if prefix not in FIELDS:
+            if prefix not in FIELDS + DATE_FIELDS:
                 raise ValueError("Unknown search field: " + prefix)
+            if prefix in DATE_FIELDS:
+                parse_date_bound(value)
             result.append((value, prefix))
         else:
             result.append((term, "all"))
     return result
+
+
+def parse_date_bound(value):
+    """Require a calendar date; ordinals work across platforms and before 1970."""
+    try:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError()
+        return date.fromisoformat(value).toordinal()
+    except (TypeError, ValueError):
+        raise ValueError("Invalid date: " + str(value) + "; use YYYY-MM-DD") from None
+
+
+def matches_date(value, lower, upper):
+    """Match cached Date headers against inclusive/exclusive UTC calendar days."""
+    if not value:
+        return False
+    try:
+        sent = parsedate_to_datetime(value)
+        # Treat headers without a timezone (including -0000) as UTC.
+        if sent.tzinfo is not None:
+            sent = sent.astimezone(timezone.utc)
+        day = sent.date().toordinal()
+    except (TypeError, ValueError, OverflowError, IndexError):
+        return False
+    return (lower is None or day >= lower) and (upper is None or day < upper)
 
 
 def compile_term(term, exact):
@@ -182,6 +212,7 @@ class MailboxStore:
         self._generation = 0
         self._patterns = {}
         self.db.create_function("matches", 2, self._matches)
+        self.db.create_function("matches_date", 3, matches_date)
         try:
             self._schema()
             self.refresh(rebuild)
@@ -321,22 +352,33 @@ class MailboxStore:
 
     def search(self, terms=(), exact=False):
         self._verify_sources()
-        if any(field not in FIELDS for _, field in terms):
+        if any(field not in FIELDS + DATE_FIELDS for _, field in terms):
             raise ValueError("Unknown search field")
+        # Validate before constructing search text, and parse each header only
+        # once per row. Keep date predicates ahead of expensive body matching.
+        dates = [(parse_date_bound(term), field) for term, field in terms if field in DATE_FIELDS]
+        lower = max((day for day, field in dates if field == "after"), default=None)
+        upper = min((day for day, field in dates if field == "before"), default=None)
         body = any(field in ("all", "content") for _, field in terms)
         if body:
             for (source_id,) in self.db.execute("SELECT id FROM sources ORDER BY path").fetchall():
                 self._ensure_search_text(source_id)
         self._generation += 1
         table = "results_" + str(self._generation)
-        clauses, keys = [], []
+        clauses, parameters, pattern_keys = [], [], []
+        if dates:
+            clauses.append("matches_date(m.date,?,?)")
+            parameters.extend((lower, upper))
         columns = {"subject": "m.subject_raw", "from": "m.sender_raw", "to": "m.recipient_raw",
                    "all": "t.text", "content": "t.text"}
         for term, field in terms:
+            if field in DATE_FIELDS:
+                continue
             key = str(len(self._patterns))
             self._patterns[key] = compile_term(term, exact)
             clauses.append("matches(?," + columns[field] + ")")
-            keys.append(key)
+            parameters.append(key)
+            pattern_keys.append(key)
         try:
             with self.db:
                 self.db.execute("CREATE TEMP TABLE " + table +
@@ -347,10 +389,10 @@ class MailboxStore:
                 if clauses:
                     query += "WHERE " + " AND ".join(clauses) + " "
                 query += "ORDER BY s.path,m.number"
-                self.db.execute("INSERT INTO " + table + "(message_id) " + query, keys)
+                self.db.execute("INSERT INTO " + table + "(message_id) " + query, parameters)
                 self._verify_sources()
         finally:
-            for key in keys:
+            for key in pattern_keys:
                 self._patterns.pop(key, None)
         return Results(self, table)
 
