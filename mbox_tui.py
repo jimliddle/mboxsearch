@@ -247,6 +247,8 @@ class Browser:
                      "/: edit search (quotes supported); c: clear; x: toggle whole word",
                      "r: refresh changed/new mailboxes; g/G or Home/End: first/last",
                      "Fields: subject:, from:, to:, content:, all:; terms use AND",
+                     "Dates: after:YYYY-MM-DD includes the day; before: excludes it",
+                     "Date bounds use UTC; missing/invalid message dates are excluded",
                      "content/all keep legacy raw MIME matching, including headers",
                      "q: quit; any other key: close help"]
             for row, text in enumerate(lines, 3):

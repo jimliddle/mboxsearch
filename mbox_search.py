@@ -8,13 +8,17 @@ from pathlib import Path
 import sqlite3
 import sys
 
-from mbox_index import MailboxStore, compile_term, parse_terms
+from mbox_index import DATE_FIELDS, MailboxStore, compile_term, matches_date, parse_date_bound, parse_terms
 from mbox_attachments import export_attachments, list_attachments
 from mbox_render import message_headers, message_text, safe_text
 
 
 def check_term(message, term, field, exact):
     """Compatibility helper: content/all search serialized MIME, including headers."""
+    if field in DATE_FIELDS:
+        bound = parse_date_bound(term)
+        return matches_date(message.get("date"), bound if field == "after" else None,
+                            bound if field == "before" else None)
     pattern = compile_term(term, exact)
     if field in ("all", "content"):
         return bool(pattern.search(message.as_string()))
@@ -119,7 +123,9 @@ def _plain_browser(store, results):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Search and browse indexed mbox email files.")
     parser.add_argument("mbox_dir", help="Directory containing .mbox files, or a single mbox file")
-    parser.add_argument("search_terms", nargs="*", help="AND terms, optionally prefixed with subject:, from:, to:, content:, all:")
+    parser.add_argument("search_terms", nargs="*", help=(
+        "AND terms: subject:, from:, to:, content:, all:, "
+        "after:YYYY-MM-DD (inclusive), before:YYYY-MM-DD (exclusive); dates use UTC"))
     parser.add_argument("--field", choices=["all", "subject", "from", "to", "content"], default="all")
     parser.add_argument("--exact", action="store_true", help="Case-insensitive whole-word matching")
     parser.add_argument("--log", help="Append matching message headers to a log file")

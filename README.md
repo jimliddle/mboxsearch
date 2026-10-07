@@ -79,6 +79,34 @@ single command-line term, as before; use explicit prefixes for multiple terms.
 In the visual search input, use quotes for phrases, such as
 `subject:"license renewal" from:alice`.
 
+Combine a sender, date range, and optional keyword in the visual search box:
+
+```text
+from:"John Smith" after:2024-01-01 before:2025-01-01
+from:"John Smith" after:2024-01-01 before:2025-01-01 content:invoice
+```
+
+The same filters work on the command line:
+
+```sh
+python mbox_search.py /path/to/archive.mbox "from:john@example.com" "after:2024-01-01" "before:2025-01-01" --list
+```
+
+`after:YYYY-MM-DD` includes that day; `before:YYYY-MM-DD` excludes that day.
+Either bound can be used on its own, and all filters must match. Boundaries use
+UTC calendar days, converting timezone-aware message dates to UTC. Dates without
+a timezone are treated as UTC. Messages with missing or invalid `Date` headers
+are excluded only when a date filter is present. Invalid search dates produce
+an error; `--exact` affects text matching only.
+
+Date filters read headers already stored in existing caches. **Updating the
+program does not require re-indexing or rebuilding the content cache**, and the
+cache schema remains version 1. Sender/date and subject/date searches do not
+build or scan the content cache. Adding `content:` or an unprefixed keyword uses
+the shared content cache as usual, with the date filter checked before matching
+the message text. Date headers are parsed during each filtered search, so date
+filtering adds some work proportional to the number of indexed messages.
+
 For compatibility, **`all` and `content` both search the serialized raw MIME
 message, including headers and encoded attachment payloads**. Field searches
 also retain raw header matching. Display decoding does not change search
